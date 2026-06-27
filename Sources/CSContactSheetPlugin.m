@@ -78,7 +78,7 @@ totalBytesExpectedToSend:(int64_t)expected {
 
 #pragma mark - Plugin
 
-@interface CSContactSheetPlugin : COPluginBase <COPublishingPlugin, COSettings>
+@interface CSContactSheetPlugin : COPluginBase <COPublishingPlugin, COActionSettings, COSettings>
 @end
 
 @implementation CSContactSheetPlugin
@@ -159,9 +159,23 @@ totalBytesExpectedToSend:(int64_t)expected {
     };
 }
 
+// Capture One calls this before rendering/starting the task. Returning NO (with an error) blocks the
+// publish — so a missing implementation stalls it entirely. We use it to require configuration.
+- (BOOL)validateSettings:(NSDictionary<NSString *, id<NSSecureCoding>> *)settings
+               forAction:(COPluginAction *)action
+                   error:(NSError * __autoreleasing *)error {
+    NSUserDefaults *d = [self defaults];
+    if ([self baseURL].length == 0 || [[d stringForKey:kToken] length] == 0 || [[d stringForKey:kGalleryId] length] == 0) {
+        if (error) *error = CSError(@"Configure ContactSheet first: Preferences → Plugins (instance URL, API token, gallery).");
+        return NO;
+    }
+    return YES;
+}
+
 - (COPluginActionPublishResult * _Nullable)startPublishingTask:(COFileHandlingPluginTask *)task
                                                         error:(NSError * __autoreleasing *)error
                                                      progress:(COPluginTaskProgress)progress {
+    NSLog(@"[ContactSheet] startPublishingTask: %lu file(s)", (unsigned long)task.files.count);
     NSString *base = [self baseURL];
     NSString *token = [[self defaults] stringForKey:kToken];
     NSString *galleryId = [[self defaults] stringForKey:kGalleryId];
@@ -201,6 +215,7 @@ totalBytesExpectedToSend:(int64_t)expected {
     up.progress = progress;
     NSError *upErr = nil;
     NSInteger code = [up uploadRequest:req body:body error:&upErr];
+    NSLog(@"[ContactSheet] upload of %lu file(s) → HTTP %ld", (unsigned long)included, (long)code);
 
     if (code < 0) { if (error) *error = CSError([@"Upload failed: " stringByAppendingString:(upErr.localizedDescription ?: @"network error")]); return nil; }
     if (code == 401) { if (error) *error = CSError(@"Unauthorized — the API token may be invalid or revoked."); return nil; }
