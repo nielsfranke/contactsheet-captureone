@@ -20,6 +20,8 @@ static NSString * const kNewGallery = @"newGalleryName"; // publish-dialog "new 
 static NSString * const kFilter = @"galleryFilter";     // publish-dialog list filter
 static NSString * const kCreate = @"createGalleryNow";  // publish-dialog "Create" checkbox
 static NSString * const kMode = @"newGalleryMode";      // mode for a newly created gallery
+static NSString * const kPresets = @"presets";          // [{id,name}] — each is its own publish action
+static NSString * const kNewPreset = @"newPresetName";  // Plugin-Manager "add recipe" field
 
 static NSError *CSError(NSString *msg) {
     return [NSError errorWithDomain:@"ContactSheet" code:1 userInfo:@{ NSLocalizedDescriptionKey: msg }];
@@ -96,6 +98,21 @@ totalBytesExpectedToSend:(int64_t)expected {
 
 - (NSUserDefaults *)defaults {
     return [[NSUserDefaults alloc] initWithSuiteName:kSuite];
+}
+
+- (NSImage *)icon {
+    return [[NSBundle bundleForClass:self.class] imageForResource:@"ContactSheet"];
+}
+
+// Export recipes — each is a separate publish action (Capture One persists its render recipe per
+// action; we remember its gallery per action). Stored as [{id,name}].
+- (NSArray<NSDictionary *> *)presets {
+    NSArray *p = [[self defaults] arrayForKey:kPresets];
+    return [p isKindOfClass:NSArray.class] ? p : @[];
+}
+
+- (void)savePresets:(NSArray *)presets {
+    [[self defaults] setObject:presets forKey:kPresets];
 }
 
 - (NSString *)baseURL {
@@ -204,11 +221,29 @@ totalBytesExpectedToSend:(int64_t)expected {
 
 - (NSArray<COPluginAction *> * _Nullable)publishingActionsFileCount:(NSUInteger)fileCount
                                                              error:(NSError * __autoreleasing *)error {
-    COPluginAction *action = [[COPluginAction alloc] initWithDisplayName:@"Upload to ContactSheet"];
-    action.identifier = @"com.nielsfranke.contactsheet.captureone.upload";
-    NSImage *icon = [[NSBundle bundleForClass:self.class] imageForResource:@"ContactSheet"];
-    if (icon) action.image = icon;
-    return @[ action ];
+    NSImage *icon = [self icon];
+    NSArray<NSDictionary *> *presets = [self presets];
+    NSMutableArray<COPluginAction *> *actions = [NSMutableArray array];
+
+    if (presets.count == 0) {
+        // No recipes defined → a single default action.
+        COPluginAction *a = [[COPluginAction alloc] initWithDisplayName:@"Upload to ContactSheet"];
+        a.identifier = @"com.nielsfranke.contactsheet.captureone.upload";
+        if (icon) a.image = icon;
+        [actions addObject:a];
+    } else {
+        // One action per recipe; Capture One persists each action's render recipe separately.
+        for (NSDictionary *p in presets) {
+            NSString *pid = CSStr(p[@"id"]);
+            if (!pid.length) continue;
+            NSString *name = CSStr(p[@"name"]);
+            COPluginAction *a = [[COPluginAction alloc] initWithDisplayName:(name.length ? name : @"ContactSheet")];
+            a.identifier = [@"com.nielsfranke.contactsheet.captureone.preset." stringByAppendingString:pid];
+            if (icon) a.image = icon;
+            [actions addObject:a];
+        }
+    }
+    return actions;
 }
 
 - (NSArray<COFileHandlingPluginTask *> * _Nullable)tasksForAction:(COPluginAction *)action
@@ -352,10 +387,10 @@ totalBytesExpectedToSend:(int64_t)expected {
     newGal.informativeText = @"Name for a new gallery.";
     [els addObject:newGal];
 
-    COSettingsListItem *modeItem = [[COSettingsListItem alloc] initWithIdentifier:kMode title:@"New gallery mode"];
+    COSettingsListItem *modeItem = [[COSettingsListItem alloc] initWithIdentifier:kMode title:@"Mode"];
     modeItem.options = @[
-        [COSettingsListOption settingsListOptionWithValue:@"presentation" title:@"Presentation (showcase)"],
-        [COSettingsListOption settingsListOptionWithValue:@"collaboration" title:@"Collaboration (review)"],
+        [COSettingsListOption settingsListOptionWithValue:@"presentation" title:@"Showcase"],
+        [COSettingsListOption settingsListOptionWithValue:@"collaboration" title:@"Review"],
     ];
     modeItem.value = [self actStr:kMode for:action] ?: @"presentation";
     [els addObject:modeItem];
@@ -433,12 +468,45 @@ totalBytesExpectedToSend:(int64_t)expected {
     [els addObject:galList];
 
     group.elements = els;
-    return @[ group ];
+
+    // Recipes tab — manage export recipes. Each recipe is a separate "Upload to ContactSheet …"
+    // publish action; Capture One persists its render recipe (Format & Size) per action, and the
+    // plugin remembers its gallery per action. Add / rename / remove here.
+    COSettingsElementsGroup *recipes = [[COSettingsElementsGroup alloc] initWithIdentifier:@"recipes" title:@"Recipes"];
+    NSMutableArray<COSettingsElement *> *rels = [NSMutableArray array];
+    for (NSDictionary *p in [self presets]) {
+        NSString *pid = CSStr(p[@"id"]);
+        if (!pid.length) continue;
+        COSettingsTextItem *nameItem = [[COSettingsTextItem alloc] initWithIdentifier:[@"presetName." stringByAppendingString:pid] title:@"Recipe"];
+        nameItem.value = CSStr(p[@"name"]);
+        [rels addObject:nameItem];
+        COSettingsButtonItem *rm = [[COSettingsButtonItem alloc] initWithIdentifier:[@"presetRemove." stringByAppendingString:pid] title:@"Remove"];
+        [rels addObject:rm];
+    }
+    COSettingsTextItem *newPreset = [[COSettingsTextItem alloc] initWithIdentifier:kNewPreset title:@"New recipe"];
+    newPreset.value = [d stringForKey:kNewPreset];
+    newPreset.informativeText = @"A recipe is a Publish action with its own export settings + gallery.";
+    [rels addObject:newPreset];
+    COSettingsButtonItem *addPreset = [[COSettingsButtonItem alloc] initWithIdentifier:@"presetAdd" title:@"Add recipe"];
+    [rels addObject:addPreset];
+    recipes.elements = rels;
+
+    return @[ group, recipes ];
 }
 
 - (BOOL)didUpdateValue:(id<NSSecureCoding>)value forSetting:(NSString *)identifier
                  error:(NSError * __autoreleasing *)error callback:(COSettingsCallback)callback {
-    [[self defaults] setObject:value forKey:identifier];
+    if ([identifier hasPrefix:@"presetName."]) {  // rename a recipe
+        NSString *pid = [identifier substringFromIndex:@"presetName.".length];
+        NSString *name = CSStr(value) ?: @"";
+        NSMutableArray *ps = [NSMutableArray array];
+        for (NSDictionary *p in [self presets]) {
+            [ps addObject:[CSStr(p[@"id"]) isEqualToString:pid] ? @{ @"id": pid, @"name": name } : p];
+        }
+        [self savePresets:ps];
+    } else {
+        [[self defaults] setObject:value forKey:identifier];
+    }
     return YES;
 }
 
@@ -451,6 +519,22 @@ totalBytesExpectedToSend:(int64_t)expected {
         NSArray *galleries = [self fetchGalleriesWithError:&fetchErr];
         if (!galleries) { if (error) *error = fetchErr; return NO; }
         [[self defaults] setObject:galleries forKey:kGalleries];
+        if (callback) callback(COSettingsCallbackActionRefresh, nil);
+    } else if ([item.identifier isEqualToString:@"presetAdd"]) {
+        NSString *name = [[[self defaults] stringForKey:kNewPreset] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (name.length == 0) { if (error) *error = CSError(@"Type a recipe name first."); return NO; }
+        NSMutableArray *ps = [[self presets] mutableCopy];
+        [ps addObject:@{ @"id": NSUUID.UUID.UUIDString, @"name": name }];
+        [self savePresets:ps];
+        [[self defaults] removeObjectForKey:kNewPreset];
+        if (callback) callback(COSettingsCallbackActionRefresh, nil);
+    } else if ([item.identifier hasPrefix:@"presetRemove."]) {
+        NSString *pid = [item.identifier substringFromIndex:@"presetRemove.".length];
+        NSMutableArray *ps = [NSMutableArray array];
+        for (NSDictionary *p in [self presets]) {
+            if (![CSStr(p[@"id"]) isEqualToString:pid]) [ps addObject:p];
+        }
+        [self savePresets:ps];
         if (callback) callback(COSettingsCallbackActionRefresh, nil);
     }
     return YES;
