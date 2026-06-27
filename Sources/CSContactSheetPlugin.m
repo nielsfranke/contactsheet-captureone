@@ -397,8 +397,11 @@ totalBytesExpectedToSend:(int64_t)expected {
 
     COSettingsBoolItem *createItem = [[COSettingsBoolItem alloc] initWithIdentifier:kCreate title:@"Create new gallery"];
     createItem.value = NO;  // always rendered unticked; ticking it creates the gallery above
-    createItem.informativeText = @"Tick to create the gallery named above and select it.";
     [els addObject:createItem];
+
+    COSettingsLabelItem *hint = [[COSettingsLabelItem alloc] initWithIdentifier:@"createHint" title:nil];
+    hint.value = @"To upload into a new gallery: type a name + Mode above, then tick \"Create new gallery\".";
+    [els addObject:hint];
 
     group.elements = els;
     return @[ group ];
@@ -474,6 +477,9 @@ totalBytesExpectedToSend:(int64_t)expected {
     // plugin remembers its gallery per action. Add / rename / remove here.
     COSettingsElementsGroup *recipes = [[COSettingsElementsGroup alloc] initWithIdentifier:@"recipes" title:@"Recipes"];
     NSMutableArray<COSettingsElement *> *rels = [NSMutableArray array];
+    COSettingsLabelItem *intro = [[COSettingsLabelItem alloc] initWithIdentifier:@"recipesIntro" title:nil];
+    intro.value = @"Each recipe is its own \"Upload to ContactSheet\" entry in the Publish menu, with its own export recipe (Format & Size) and gallery.";
+    [rels addObject:intro];
     for (NSDictionary *p in [self presets]) {
         NSString *pid = CSStr(p[@"id"]);
         if (!pid.length) continue;
