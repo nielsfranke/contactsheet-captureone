@@ -9,6 +9,9 @@ MIT-licensed and independent of ContactSheet itself: it only speaks ContactSheet
 over HTTPS. It links — but does **not** bundle — Capture One's proprietary
 `CaptureOnePlugins.framework` (Capture One ships its own copy).
 
+> **macOS only** for now. Capture One's plugin SDK is per-platform (macOS uses Objective-C/Swift,
+> Windows uses C#), so a Windows version would need a separate C# port.
+
 ## Features
 
 - **Publish to a gallery** from Capture One's normal Publish flow, with the full Format & Size
@@ -115,6 +118,8 @@ export CO_SDK="/path/to/Capture One Plugin SDK (Mac) v1.0.1"
 
 - Gallery **cover thumbnails** in the gallery dropdown.
 - **Upload to multiple galleries** at once.
+- A **Windows** (C#) port.
+- Developer-ID signing + **notarisation** for friction-free installs.
 
 ## License
 
