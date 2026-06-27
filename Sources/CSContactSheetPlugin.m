@@ -16,7 +16,9 @@ static NSString * const kURL = @"instanceURL";
 static NSString * const kToken = @"apiToken";
 static NSString * const kGalleryId = @"galleryId";
 static NSString * const kGalleries = @"galleries"; // cached [{id,name,share_token}]
-static NSString * const kNewGallery = @"newGalleryName"; // Plugin-Manager "create gallery" field
+static NSString * const kNewGallery = @"newGalleryName"; // publish-dialog "new gallery" name field
+static NSString * const kFilter = @"galleryFilter";     // publish-dialog list filter
+static NSString * const kCreate = @"createGalleryNow";  // publish-dialog "Create" checkbox
 
 static NSError *CSError(NSString *msg) {
     return [NSError errorWithDomain:@"ContactSheet" code:1 userInfo:@{ NSLocalizedDescriptionKey: msg }];
@@ -37,7 +39,8 @@ static void CSFlatten(NSArray *nodes, NSInteger depth, NSMutableArray *out) {
         NSString *display = depth > 0 ? [NSString stringWithFormat:@"%@↳ %@", indent, name] : name;
         NSString *gid = CSStr(g[@"id"]);
         if (gid) {
-            [out addObject:@{ @"id": gid, @"name": display, @"share_token": (CSStr(g[@"share_token"]) ?: @"") }];
+            [out addObject:@{ @"id": gid, @"name": display, @"share_token": (CSStr(g[@"share_token"]) ?: @""),
+                              @"search": name.lowercaseString }];
         }
         if ([g[@"children"] isKindOfClass:NSArray.class]) CSFlatten(g[@"children"], depth + 1, out);
     }
@@ -170,10 +173,12 @@ totalBytesExpectedToSend:(int64_t)expected {
     if (![g isKindOfClass:NSDictionary.class] || ![g[@"id"] isKindOfClass:NSString.class]) {
         if (error) *error = CSError(@"Unexpected response creating the gallery."); return nil;
     }
+    NSString *gname = [g[@"name"] isKindOfClass:NSString.class] ? g[@"name"] : name;
     NSDictionary *entry = @{
         @"id": g[@"id"],
-        @"name": [g[@"name"] isKindOfClass:NSString.class] ? g[@"name"] : name,
+        @"name": gname,
         @"share_token": [g[@"share_token"] isKindOfClass:NSString.class] ? g[@"share_token"] : @"",
+        @"search": gname.lowercaseString,
     };
     NSMutableArray *cache = [[[self defaults] arrayForKey:kGalleries] mutableCopy] ?: [NSMutableArray array];
     [cache addObject:entry];
@@ -181,11 +186,17 @@ totalBytesExpectedToSend:(int64_t)expected {
     return entry;
 }
 
-// The destination chosen in a publish action's ContactSheet tab, persisted by us (keyed per action)
-// as a fallback in case Capture One does not echo it back via task.settings.
-- (NSString *)storedActionGallery:(COPluginAction *)action {
-    NSString *v = [[self defaults] stringForKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, kGalleryId]];
+// Per-action settings we persist ourselves (keyed by action id): the publish-dialog gallery choice
+// (a fallback in case Capture One doesn't echo task.settings) plus the transient filter / new-name.
+- (NSString *)actStr:(NSString *)key for:(COPluginAction *)action {
+    NSString *v = [[self defaults] stringForKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, key]];
     return [v isKindOfClass:NSString.class] ? v : nil;
+}
+
+- (void)setAct:(NSString *)key for:(COPluginAction *)action to:(NSString *)value {
+    NSString *k = [NSString stringWithFormat:@"act.%@.%@", action.identifier, key];
+    if (value.length) [[self defaults] setObject:value forKey:k];
+    else [[self defaults] removeObjectForKey:k];
 }
 
 #pragma mark COPublishingPlugin
@@ -223,7 +234,7 @@ totalBytesExpectedToSend:(int64_t)expected {
         return NO;
     }
     NSString *picked = CSStr(settings[kGalleryId]);
-    if (picked.length == 0) picked = [self storedActionGallery:action];
+    if (picked.length == 0) picked = [self actStr:kGalleryId for:action];
     if (picked.length == 0) picked = [d stringForKey:kGalleryId];
     if (picked.length == 0) {
         if (error) *error = CSError(@"Choose a destination gallery in the ContactSheet tab.");
@@ -246,7 +257,7 @@ totalBytesExpectedToSend:(int64_t)expected {
     // Destination: the gallery chosen in this publish action's ContactSheet tab (via task.settings,
     // falling back to our own per-action store), else the default gallery from the Plugin Manager.
     NSString *galleryId = CSStr(task.settings[kGalleryId]);
-    if (galleryId.length == 0) galleryId = [self storedActionGallery:task.action];
+    if (galleryId.length == 0) galleryId = [self actStr:kGalleryId for:task.action];
     if (galleryId.length == 0) galleryId = [[self defaults] stringForKey:kGalleryId];
     if (galleryId.length == 0) { if (error) *error = CSError(@"No destination gallery selected."); return nil; }
 
@@ -302,27 +313,46 @@ totalBytesExpectedToSend:(int64_t)expected {
                                                              error:(NSError * __autoreleasing *)error {
     NSUserDefaults *d = [self defaults];
     COSettingsElementsGroup *group = [[COSettingsElementsGroup alloc] initWithIdentifier:@"contactsheet-dest" title:@"ContactSheet"];
-
-    COSettingsListItem *galList = [[COSettingsListItem alloc] initWithIdentifier:kGalleryId title:@"Gallery"];
+    NSMutableArray<COSettingsElement *> *els = [NSMutableArray array];
     NSArray *galleries = [d arrayForKey:kGalleries];
+
+    // Filter — narrows the gallery list below (handy for large, deep libraries).
+    NSString *filter = [self actStr:kFilter for:action];
+    COSettingsTextItem *filterItem = [[COSettingsTextItem alloc] initWithIdentifier:kFilter title:@"Filter"];
+    filterItem.value = filter;
+    filterItem.informativeText = @"Type part of a name to narrow the list below.";
+    [els addObject:filterItem];
+
+    // Gallery list, filtered + hierarchy-indented.
+    COSettingsListItem *galList = [[COSettingsListItem alloc] initWithIdentifier:kGalleryId title:@"Gallery"];
+    NSString *f = filter.lowercaseString;
     NSMutableArray<COSettingsListOption *> *opts = [NSMutableArray array];
     for (NSDictionary *g in galleries) {
+        if (f.length && ![(CSStr(g[@"search"]) ?: @"") containsString:f]) continue;
         [opts addObject:[COSettingsListOption settingsListOptionWithValue:g[@"id"] title:g[@"name"]]];
     }
     galList.options = opts;
     NSString *cur = CSStr(settings[kGalleryId]);
-    if (cur.length == 0) cur = [self storedActionGallery:action];
+    if (cur.length == 0) cur = [self actStr:kGalleryId for:action];
     if (cur.length == 0) cur = [d stringForKey:kGalleryId];
     galList.value = cur;
-    galList.informativeText = galleries.count ? @"Destination gallery for this export." : @"Load galleries in Preferences → Plugins first.";
+    galList.informativeText = !galleries.count ? @"Load galleries in Preferences → Plugins first."
+        : (opts.count ? @"Destination gallery for this export." : @"No galleries match the filter.");
+    [els addObject:galList];
 
-    // Type a name + Enter to create a new gallery and select it (handled in didUpdateValue, so it
-    // happens on field commit — never on every publish). Always rendered empty.
+    // Create a new gallery: type a name, then tick "Create new gallery" (explicit confirmation —
+    // nothing is created just by typing).
     COSettingsTextItem *newGal = [[COSettingsTextItem alloc] initWithIdentifier:kNewGallery title:@"New gallery"];
-    newGal.value = @"";
-    newGal.informativeText = @"Type a name and press Enter to create a new gallery and select it.";
+    newGal.value = [self actStr:kNewGallery for:action];
+    newGal.informativeText = @"Name for a new gallery.";
+    [els addObject:newGal];
 
-    group.elements = @[ galList, newGal ];
+    COSettingsBoolItem *createItem = [[COSettingsBoolItem alloc] initWithIdentifier:kCreate title:@"Create new gallery"];
+    createItem.value = NO;  // always rendered unticked; ticking it creates the gallery above
+    createItem.informativeText = @"Tick to create the gallery named above and select it.";
+    [els addObject:createItem];
+
+    group.elements = els;
     return @[ group ];
 }
 
@@ -331,18 +361,23 @@ totalBytesExpectedToSend:(int64_t)expected {
        callbackAction:(COActionSettingsCallbackAction *)callbackAction error:(NSError * __autoreleasing *)error {
     // Mirror the per-publish gallery choice into our own store (keyed per action), so it survives
     // even if Capture One does not echo it back through task.settings.
-    NSString *sv = CSStr(value);
-    if ([identifier isEqualToString:kGalleryId] && sv) {
-        [[self defaults] setObject:sv forKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, kGalleryId]];
+    if ([identifier isEqualToString:kGalleryId]) {
+        if (CSStr(value)) [self setAct:kGalleryId for:action to:CSStr(value)];
     } else if ([identifier isEqualToString:kNewGallery]) {
-        NSString *name = [sv stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (name.length) {
+        [self setAct:kNewGallery for:action to:(CSStr(value) ?: @"")];  // remember the name; do NOT create
+    } else if ([identifier isEqualToString:kFilter]) {
+        [self setAct:kFilter for:action to:(CSStr(value) ?: @"")];
+        if (callbackAction) *callbackAction = COActionSettingsCallbackActionRefresh;  // re-filter the list
+    } else if ([identifier isEqualToString:kCreate]) {
+        BOOL on = [(id)value isKindOfClass:NSNumber.class] && [(NSNumber *)value boolValue];
+        if (on) {  // explicit confirmation → create the gallery named above
+            NSString *name = [[self actStr:kNewGallery for:action] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (name.length == 0) { if (error) *error = CSError(@"Type a gallery name first."); return NO; }
             NSError *createErr = nil;
             NSDictionary *created = [self createGalleryNamed:name error:&createErr];
             if (!created) { if (error) *error = createErr; return NO; }
-            // Select the new gallery for this action; the refresh re-renders the dropdown (now
-            // including it, selected) and clears the name field.
-            [[self defaults] setObject:created[@"id"] forKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, kGalleryId]];
+            [self setAct:kGalleryId for:action to:created[@"id"]];  // select the new gallery
+            [self setAct:kNewGallery for:action to:@""];            // clear the name field
             if (callbackAction) *callbackAction = COActionSettingsCallbackActionRefresh;
         }
     }
@@ -378,16 +413,8 @@ totalBytesExpectedToSend:(int64_t)expected {
     }
     galList.options = opts;
     galList.value = [d stringForKey:kGalleryId];
-    galList.informativeText = galleries.count ? @"Pre-selected destination — you can still pick another per export." : @"Enter the URL + token, then click Load galleries.";
+    galList.informativeText = galleries.count ? @"Default destination — you can pick another (or create one) per export." : @"Enter the URL + token, then click Load galleries.";
     [els addObject:galList];
-
-    COSettingsTextItem *newGal = [[COSettingsTextItem alloc] initWithIdentifier:kNewGallery title:@"New gallery"];
-    newGal.value = [d stringForKey:kNewGallery];
-    newGal.informativeText = @"Type a name, then Create gallery — it's added to ContactSheet and the list.";
-    [els addObject:newGal];
-
-    COSettingsButtonItem *createBtn = [[COSettingsButtonItem alloc] initWithIdentifier:@"createGallery" title:@"Create gallery"];
-    [els addObject:createBtn];
 
     group.elements = els;
     return @[ group ];
@@ -402,22 +429,12 @@ totalBytesExpectedToSend:(int64_t)expected {
 - (BOOL)handleEvent:(COSettingsEvent)event forSettingsItem:(COSettingsItem *)item
               error:(NSError * __autoreleasing *)error callback:(COSettingsCallback)callback {
     if (event != COSettingsEventButtonClick) return YES;
-    NSUserDefaults *d = [self defaults];
 
     if ([item.identifier isEqualToString:@"loadGalleries"]) {
         NSError *fetchErr = nil;
         NSArray *galleries = [self fetchGalleriesWithError:&fetchErr];
         if (!galleries) { if (error) *error = fetchErr; return NO; }
-        [d setObject:galleries forKey:kGalleries];
-        if (callback) callback(COSettingsCallbackActionRefresh, nil);
-    } else if ([item.identifier isEqualToString:@"createGallery"]) {
-        NSString *name = [[d stringForKey:kNewGallery] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (name.length == 0) { if (error) *error = CSError(@"Type a name for the new gallery first."); return NO; }
-        NSError *createErr = nil;
-        NSDictionary *created = [self createGalleryNamed:name error:&createErr];
-        if (!created) { if (error) *error = createErr; return NO; }
-        [d setObject:created[@"id"] forKey:kGalleryId];  // select the new gallery as default
-        [d removeObjectForKey:kNewGallery];               // clear the input
+        [[self defaults] setObject:galleries forKey:kGalleries];
         if (callback) callback(COSettingsCallbackActionRefresh, nil);
     }
     return YES;
