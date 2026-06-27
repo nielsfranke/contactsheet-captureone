@@ -1,0 +1,5 @@
+build/
+*.coplugin
+.DS_Store
+# The Capture One Plugin SDK is proprietary — never commit it. Point CO_SDK at a local copy.
+Capture One Plugin SDK*/
