@@ -19,6 +19,7 @@ static NSString * const kGalleries = @"galleries"; // cached [{id,name,share_tok
 static NSString * const kNewGallery = @"newGalleryName"; // publish-dialog "new gallery" name field
 static NSString * const kFilter = @"galleryFilter";     // publish-dialog list filter
 static NSString * const kCreate = @"createGalleryNow";  // publish-dialog "Create" checkbox
+static NSString * const kMode = @"newGalleryMode";      // mode for a newly created gallery
 
 static NSError *CSError(NSString *msg) {
     return [NSError errorWithDomain:@"ContactSheet" code:1 userInfo:@{ NSLocalizedDescriptionKey: msg }];
@@ -146,7 +147,7 @@ totalBytesExpectedToSend:(int64_t)expected {
 }
 
 // POST /api/galleries → the new gallery dict {id,name,share_token}, appended to the cache. nil + *error.
-- (NSDictionary *)createGalleryNamed:(NSString *)name error:(NSError **)error {
+- (NSDictionary *)createGalleryNamed:(NSString *)name mode:(NSString *)mode error:(NSError **)error {
     NSString *base = [self baseURL];
     NSString *token = [[self defaults] stringForKey:kToken];
     if (!base.length || !token.length) { if (error) *error = CSError(@"Enter the instance URL and API token first."); return nil; }
@@ -154,7 +155,7 @@ totalBytesExpectedToSend:(int64_t)expected {
     req.HTTPMethod = @"POST";
     [req setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{ @"name": name, @"mode": @"presentation" } options:0 error:nil];
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{ @"name": name, @"mode": (mode.length ? mode : @"presentation") } options:0 error:nil];
     req.timeoutInterval = 20;
 
     __block NSData *data; __block NSURLResponse *resp; __block NSError *err;
@@ -205,6 +206,8 @@ totalBytesExpectedToSend:(int64_t)expected {
                                                              error:(NSError * __autoreleasing *)error {
     COPluginAction *action = [[COPluginAction alloc] initWithDisplayName:@"Upload to ContactSheet"];
     action.identifier = @"com.nielsfranke.contactsheet.captureone.upload";
+    NSImage *icon = [[NSBundle bundleForClass:self.class] imageForResource:@"ContactSheet"];
+    if (icon) action.image = icon;
     return @[ action ];
 }
 
@@ -316,12 +319,14 @@ totalBytesExpectedToSend:(int64_t)expected {
     NSMutableArray<COSettingsElement *> *els = [NSMutableArray array];
     NSArray *galleries = [d arrayForKey:kGalleries];
 
-    // Filter — narrows the gallery list below (handy for large, deep libraries).
-    NSString *filter = [self actStr:kFilter for:action];
-    COSettingsTextItem *filterItem = [[COSettingsTextItem alloc] initWithIdentifier:kFilter title:@"Filter"];
-    filterItem.value = filter;
-    filterItem.informativeText = @"Type part of a name to narrow the list below.";
-    [els addObject:filterItem];
+    // Filter — only worth showing for large libraries; narrows the gallery list below.
+    NSString *filter = nil;
+    if (galleries.count > 15) {
+        filter = [self actStr:kFilter for:action];
+        COSettingsTextItem *filterItem = [[COSettingsTextItem alloc] initWithIdentifier:kFilter title:@"Filter galleries"];
+        filterItem.value = filter;
+        [els addObject:filterItem];
+    }
 
     // Gallery list, filtered + hierarchy-indented.
     COSettingsListItem *galList = [[COSettingsListItem alloc] initWithIdentifier:kGalleryId title:@"Gallery"];
@@ -347,6 +352,14 @@ totalBytesExpectedToSend:(int64_t)expected {
     newGal.informativeText = @"Name for a new gallery.";
     [els addObject:newGal];
 
+    COSettingsListItem *modeItem = [[COSettingsListItem alloc] initWithIdentifier:kMode title:@"New gallery mode"];
+    modeItem.options = @[
+        [COSettingsListOption settingsListOptionWithValue:@"presentation" title:@"Presentation (showcase)"],
+        [COSettingsListOption settingsListOptionWithValue:@"collaboration" title:@"Collaboration (review)"],
+    ];
+    modeItem.value = [self actStr:kMode for:action] ?: @"presentation";
+    [els addObject:modeItem];
+
     COSettingsBoolItem *createItem = [[COSettingsBoolItem alloc] initWithIdentifier:kCreate title:@"Create new gallery"];
     createItem.value = NO;  // always rendered unticked; ticking it creates the gallery above
     createItem.informativeText = @"Tick to create the gallery named above and select it.";
@@ -365,6 +378,8 @@ totalBytesExpectedToSend:(int64_t)expected {
         if (CSStr(value)) [self setAct:kGalleryId for:action to:CSStr(value)];
     } else if ([identifier isEqualToString:kNewGallery]) {
         [self setAct:kNewGallery for:action to:(CSStr(value) ?: @"")];  // remember the name; do NOT create
+    } else if ([identifier isEqualToString:kMode]) {
+        [self setAct:kMode for:action to:(CSStr(value) ?: @"presentation")];
     } else if ([identifier isEqualToString:kFilter]) {
         [self setAct:kFilter for:action to:(CSStr(value) ?: @"")];
         if (callbackAction) *callbackAction = COActionSettingsCallbackActionRefresh;  // re-filter the list
@@ -373,8 +388,9 @@ totalBytesExpectedToSend:(int64_t)expected {
         if (on) {  // explicit confirmation → create the gallery named above
             NSString *name = [[self actStr:kNewGallery for:action] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
             if (name.length == 0) { if (error) *error = CSError(@"Type a gallery name first."); return NO; }
+            NSString *mode = [self actStr:kMode for:action] ?: @"presentation";
             NSError *createErr = nil;
-            NSDictionary *created = [self createGalleryNamed:name error:&createErr];
+            NSDictionary *created = [self createGalleryNamed:name mode:mode error:&createErr];
             if (!created) { if (error) *error = createErr; return NO; }
             [self setAct:kGalleryId for:action to:created[@"id"]];  // select the new gallery
             [self setAct:kNewGallery for:action to:@""];            // clear the name field
