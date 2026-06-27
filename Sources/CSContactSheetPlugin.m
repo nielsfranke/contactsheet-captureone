@@ -27,18 +27,19 @@ static NSString *CSStr(id value) {
     return [value isKindOfClass:NSString.class] ? (NSString *)value : nil;
 }
 
-// Flatten the gallery tree (children) into a display list, indenting nested galleries by path.
-static void CSFlatten(NSArray *nodes, NSString *prefix, NSMutableArray *out) {
+// Flatten the gallery tree (children) into a display list, indenting nested galleries by depth so
+// the hierarchy is visible in the dropdown. Non-breaking spaces survive the list rendering.
+static void CSFlatten(NSArray *nodes, NSInteger depth, NSMutableArray *out) {
     for (NSDictionary *g in nodes) {
         if (![g isKindOfClass:NSDictionary.class]) continue;
-        NSString *name = [g[@"name"] isKindOfClass:NSString.class] ? g[@"name"] : @"(unnamed)";
-        NSString *display = prefix.length ? [NSString stringWithFormat:@"%@ / %@", prefix, name] : name;
-        NSString *gid = g[@"id"];
-        if ([gid isKindOfClass:NSString.class]) {
-            NSString *share = [g[@"share_token"] isKindOfClass:NSString.class] ? g[@"share_token"] : @"";
-            [out addObject:@{ @"id": gid, @"name": display, @"share_token": share }];
+        NSString *name = CSStr(g[@"name"]) ?: @"(unnamed)";
+        NSString *indent = [@"" stringByPaddingToLength:(depth * 4) withString:@" " startingAtIndex:0];
+        NSString *display = depth > 0 ? [NSString stringWithFormat:@"%@↳ %@", indent, name] : name;
+        NSString *gid = CSStr(g[@"id"]);
+        if (gid) {
+            [out addObject:@{ @"id": gid, @"name": display, @"share_token": (CSStr(g[@"share_token"]) ?: @"") }];
         }
-        if ([g[@"children"] isKindOfClass:NSArray.class]) CSFlatten(g[@"children"], display, out);
+        if ([g[@"children"] isKindOfClass:NSArray.class]) CSFlatten(g[@"children"], depth + 1, out);
     }
 }
 
@@ -136,7 +137,7 @@ totalBytesExpectedToSend:(int64_t)expected {
     id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (![json isKindOfClass:NSArray.class]) { if (error) *error = CSError(@"Unexpected response from the server."); return nil; }
     NSMutableArray *flat = [NSMutableArray array];
-    CSFlatten(json, @"", flat);
+    CSFlatten(json, 0, flat);
     if (flat.count == 0) { if (error) *error = CSError(@"No galleries found for this token."); return nil; }
     return flat;
 }
@@ -315,7 +316,13 @@ totalBytesExpectedToSend:(int64_t)expected {
     galList.value = cur;
     galList.informativeText = galleries.count ? @"Destination gallery for this export." : @"Load galleries in Preferences → Plugins first.";
 
-    group.elements = @[ galList ];
+    // Type a name + Enter to create a new gallery and select it (handled in didUpdateValue, so it
+    // happens on field commit — never on every publish). Always rendered empty.
+    COSettingsTextItem *newGal = [[COSettingsTextItem alloc] initWithIdentifier:kNewGallery title:@"New gallery"];
+    newGal.value = @"";
+    newGal.informativeText = @"Type a name and press Enter to create a new gallery and select it.";
+
+    group.elements = @[ galList, newGal ];
     return @[ group ];
 }
 
@@ -327,6 +334,17 @@ totalBytesExpectedToSend:(int64_t)expected {
     NSString *sv = CSStr(value);
     if ([identifier isEqualToString:kGalleryId] && sv) {
         [[self defaults] setObject:sv forKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, kGalleryId]];
+    } else if ([identifier isEqualToString:kNewGallery]) {
+        NSString *name = [sv stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (name.length) {
+            NSError *createErr = nil;
+            NSDictionary *created = [self createGalleryNamed:name error:&createErr];
+            if (!created) { if (error) *error = createErr; return NO; }
+            // Select the new gallery for this action; the refresh re-renders the dropdown (now
+            // including it, selected) and clears the name field.
+            [[self defaults] setObject:created[@"id"] forKey:[NSString stringWithFormat:@"act.%@.%@", action.identifier, kGalleryId]];
+            if (callbackAction) *callbackAction = COActionSettingsCallbackActionRefresh;
+        }
     }
     return YES;
 }
