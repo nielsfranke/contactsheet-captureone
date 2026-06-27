@@ -34,14 +34,21 @@ over HTTPS. It links — but does **not** bundle — Capture One's proprietary
 
 ## Install
 
-There's no pre-built release yet — build from source (see [Building](#building)):
+**From a release (recommended)** — no build tools needed:
 
-```bash
-export CO_SDK="/path/to/Capture One Plugin SDK (Mac) v1.0.1"   # if not at the default path
-./build.sh && ./install.sh
-```
+1. Download `ContactSheet-<version>.coplugin.zip` from the
+   [releases page](https://github.com/nielsfranke/contactsheet-captureone/releases) and unzip it.
+2. Copy **`ContactSheet.coplugin`** into:
+   `~/Library/Application Support/Capture One/Plug-ins/`
+3. **Restart Capture One.**
 
-Then **restart Capture One**.
+> The build is ad-hoc signed but **not notarised** (no Apple Developer ID yet). If macOS blocks it
+> after a download, clear the quarantine flag once:
+> ```bash
+> xattr -dr com.apple.quarantine ~/Library/Application\ Support/Capture\ One/Plug-ins/ContactSheet.coplugin
+> ```
+
+**From source** — see [Building](#building); `./build.sh && ./install.sh`.
 
 ## Setup
 
@@ -102,6 +109,7 @@ export CO_SDK="/path/to/Capture One Plugin SDK (Mac) v1.0.1"
 | `Resources/ContactSheet.png` | Plugin icon source (built into a multi-size `.icns`) |
 | `build.sh` | Compile + assemble + sign the `.coplugin` |
 | `install.sh` | Install into the user Plug-ins folder |
+| `release.sh` | Build + zip a distributable `dist/ContactSheet-<version>.coplugin.zip` |
 
 ## Roadmap
 
