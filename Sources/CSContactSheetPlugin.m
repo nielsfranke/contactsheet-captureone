@@ -32,6 +32,17 @@ static NSString *CSStr(id value) {
     return [value isKindOfClass:NSString.class] ? (NSString *)value : nil;
 }
 
+// Content-type for a rendered file — Capture One's recipe may produce JPEG/TIFF/PNG/etc. The
+// backend magic-byte-validates regardless, but a correct header is tidier.
+static NSString *CSMime(NSString *path) {
+    NSString *ext = path.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) return @"image/jpeg";
+    if ([ext isEqualToString:@"png"]) return @"image/png";
+    if ([ext isEqualToString:@"tif"] || [ext isEqualToString:@"tiff"]) return @"image/tiff";
+    if ([ext isEqualToString:@"heic"]) return @"image/heic";
+    return @"application/octet-stream";
+}
+
 // Flatten the gallery tree (children) into a display list, indenting nested galleries by depth so
 // the hierarchy is visible in the dropdown. Non-breaking spaces survive the list rendering.
 static void CSFlatten(NSArray *nodes, NSInteger depth, NSMutableArray *out) {
@@ -237,7 +248,8 @@ totalBytesExpectedToSend:(int64_t)expected {
             NSString *pid = CSStr(p[@"id"]);
             if (!pid.length) continue;
             NSString *name = CSStr(p[@"name"]);
-            COPluginAction *a = [[COPluginAction alloc] initWithDisplayName:(name.length ? name : @"ContactSheet")];
+            NSString *display = name.length ? [@"ContactSheet: " stringByAppendingString:name] : @"Upload to ContactSheet";
+            COPluginAction *a = [[COPluginAction alloc] initWithDisplayName:display];
             a.identifier = [@"com.nielsfranke.contactsheet.captureone.preset." stringByAppendingString:pid];
             if (icon) a.image = icon;
             [actions addObject:a];
@@ -259,6 +271,11 @@ totalBytesExpectedToSend:(int64_t)expected {
         COProcessFileFormatKey: @(COProcessFileFormatJPEG),
         COProcessJpegQualityKey: @(92),
     };
+}
+
+// Show the full recipe (Format & Size, etc.) in the publish dialog so each recipe is fully editable.
+- (COProcessingSettingsVisibilityOptions)processingSettingsVisibilityForAction:(COPluginAction *)action {
+    return COProcessingSettingsVisibilityOptionsShowAll;
 }
 
 // Capture One calls this before rendering/starting the task. Returning NO (with an error) blocks the
@@ -310,8 +327,8 @@ totalBytesExpectedToSend:(int64_t)expected {
         NSData *fileData = [NSData dataWithContentsOfFile:path];
         if (!fileData) continue;
         NSString *part = [NSString stringWithFormat:
-            @"--%@\r\nContent-Disposition: form-data; name=\"files\"; filename=\"%@\"\r\nContent-Type: image/jpeg\r\n\r\n",
-            boundary, path.lastPathComponent];
+            @"--%@\r\nContent-Disposition: form-data; name=\"files\"; filename=\"%@\"\r\nContent-Type: %@\r\n\r\n",
+            boundary, path.lastPathComponent, CSMime(path)];
         [body appendData:[part dataUsingEncoding:NSUTF8StringEncoding]];
         [body appendData:fileData];
         [body appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
@@ -350,20 +367,20 @@ totalBytesExpectedToSend:(int64_t)expected {
                                                           settings:(NSDictionary<NSString *, id<NSSecureCoding>> *)settings
                                                              error:(NSError * __autoreleasing *)error {
     NSUserDefaults *d = [self defaults];
-    COSettingsElementsGroup *group = [[COSettingsElementsGroup alloc] initWithIdentifier:@"contactsheet-dest" title:@"ContactSheet"];
-    NSMutableArray<COSettingsElement *> *els = [NSMutableArray array];
+    COSettingsElementsGroup *tab = [[COSettingsElementsGroup alloc] initWithIdentifier:@"contactsheet-dest" title:@"ContactSheet"];
     NSArray *galleries = [d arrayForKey:kGalleries];
 
-    // Filter — only worth showing for large libraries; narrows the gallery list below.
-    NSString *filter = nil;
-    if (galleries.count > 15) {
-        filter = [self actStr:kFilter for:action];
-        COSettingsTextItem *filterItem = [[COSettingsTextItem alloc] initWithIdentifier:kFilter title:@"Filter galleries"];
-        filterItem.value = filter;
-        [els addObject:filterItem];
-    }
+    // Section 1 — pick an existing gallery.
+    COSettingsItemsGroup *destSection = [[COSettingsItemsGroup alloc] initWithIdentifier:@"section-dest" title:@"Upload to"];
+    NSMutableArray<COSettingsItem *> *destItems = [NSMutableArray array];
 
-    // Gallery list, filtered + hierarchy-indented.
+    NSString *filter = nil;
+    if (galleries.count > 15) {  // only worth a filter box for large libraries
+        filter = [self actStr:kFilter for:action];
+        COSettingsTextItem *filterItem = [[COSettingsTextItem alloc] initWithIdentifier:kFilter title:@"Filter"];
+        filterItem.value = filter;
+        [destItems addObject:filterItem];
+    }
     COSettingsListItem *galList = [[COSettingsListItem alloc] initWithIdentifier:kGalleryId title:@"Gallery"];
     NSString *f = filter.lowercaseString;
     NSMutableArray<COSettingsListOption *> *opts = [NSMutableArray array];
@@ -376,16 +393,18 @@ totalBytesExpectedToSend:(int64_t)expected {
     if (cur.length == 0) cur = [self actStr:kGalleryId for:action];
     if (cur.length == 0) cur = [d stringForKey:kGalleryId];
     galList.value = cur;
-    galList.informativeText = !galleries.count ? @"Load galleries in Preferences → Plugins first."
-        : (opts.count ? @"Destination gallery for this export." : @"No galleries match the filter.");
-    [els addObject:galList];
+    [destItems addObject:galList];
+    if (!galleries.count) {
+        COSettingsLabelItem *empty = [[COSettingsLabelItem alloc] initWithIdentifier:@"emptyHint" title:nil];
+        empty.value = @"No galleries yet — load them in Preferences → Plugins → ContactSheet.";
+        [destItems addObject:empty];
+    }
+    destSection.items = destItems;
 
-    // Create a new gallery: type a name, then tick "Create new gallery" (explicit confirmation —
-    // nothing is created just by typing).
-    COSettingsTextItem *newGal = [[COSettingsTextItem alloc] initWithIdentifier:kNewGallery title:@"New gallery"];
+    // Section 2 — or create a new gallery.
+    COSettingsItemsGroup *createSection = [[COSettingsItemsGroup alloc] initWithIdentifier:@"section-create" title:@"New gallery"];
+    COSettingsTextItem *newGal = [[COSettingsTextItem alloc] initWithIdentifier:kNewGallery title:@"Name"];
     newGal.value = [self actStr:kNewGallery for:action];
-    newGal.informativeText = @"Name for a new gallery.";
-    [els addObject:newGal];
 
     COSettingsListItem *modeItem = [[COSettingsListItem alloc] initWithIdentifier:kMode title:@"Mode"];
     modeItem.options = @[
@@ -393,18 +412,16 @@ totalBytesExpectedToSend:(int64_t)expected {
         [COSettingsListOption settingsListOptionWithValue:@"collaboration" title:@"Review"],
     ];
     modeItem.value = [self actStr:kMode for:action] ?: @"presentation";
-    [els addObject:modeItem];
 
     COSettingsBoolItem *createItem = [[COSettingsBoolItem alloc] initWithIdentifier:kCreate title:@"Create new gallery"];
     createItem.value = NO;  // always rendered unticked; ticking it creates the gallery above
-    [els addObject:createItem];
 
     COSettingsLabelItem *hint = [[COSettingsLabelItem alloc] initWithIdentifier:@"createHint" title:nil];
-    hint.value = @"To upload into a new gallery: type a name + Mode above, then tick \"Create new gallery\".";
-    [els addObject:hint];
+    hint.value = @"Type a name + Mode, then tick \"Create new gallery\" to create it and upload into it.";
+    createSection.items = @[ newGal, modeItem, createItem, hint ];
 
-    group.elements = els;
-    return @[ group ];
+    tab.elements = @[ destSection, createSection ];
+    return @[ tab ];
 }
 
 - (BOOL)didUpdateValue:(id<NSSecureCoding>)value forSetting:(NSString *)identifier
